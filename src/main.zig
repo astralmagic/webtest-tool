@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const build_options = @import("build_options");
 
 const version = build_options.version;
@@ -525,8 +526,28 @@ fn nowMs() i64 {
     return std.time.milliTimestamp();
 }
 
+fn isSafeRuntimePath(path: []const u8) bool {
+    if (path.len == 0 or path[0] != '/') return false;
+    if (std.mem.indexOfScalar(u8, path, 0) != null) return false;
+    var it = std.mem.splitScalar(u8, path, '/');
+    while (it.next()) |seg| {
+        if (std.mem.eql(u8, seg, "..")) return false;
+    }
+    return true;
+}
+
+fn isPeerAuthorized(fd: std.posix.fd_t) bool {
+    if (comptime builtin.os.tag == .linux) {
+        var cred: std.os.linux.ucred = undefined;
+        std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.PEERCRED, std.mem.asBytes(&cred)) catch return false;
+        return cred.uid == std.os.linux.geteuid();
+    }
+    return true;
+}
+
 fn runShellScript(allocator: std.mem.Allocator, script_path: []const u8, runtime_root: ?[]const u8) bool {
     if (script_path.len == 0) return true;
+    if (!isSafeRuntimePath(script_path)) return false;
     debugLog("runShellScript path={s} runtime_root={s}", .{ script_path, runtime_root orelse "" });
     const argv = [_][]const u8{ "/bin/sh", script_path };
     var child = std.process.Child.init(&argv, allocator);
@@ -1153,6 +1174,7 @@ fn handleCommand(allocator: std.mem.Allocator, state: *State, command: []const u
 
     if (std.mem.eql(u8, verb, "run")) {
         const config_path = parts.next() orelse return try allocator.dupe(u8, "invalid\n");
+        if (!isSafeRuntimePath(config_path)) return try allocator.dupe(u8, "invalid\n");
         state.mutex.lock();
         if (state.worker_active) {
             state.mutex.unlock();
@@ -1197,6 +1219,7 @@ fn runWebtestd(allocator: std.mem.Allocator, socket_path: []const u8) !void {
     }
     var addr = try std.net.Address.initUnix(socket_path);
     var server = try addr.listen(.{});
+    std.posix.fchmodat(std.posix.AT.FDCWD, socket_path, 0o600, 0) catch {};
     defer {
         server.deinit();
         std.fs.cwd().deleteFile(socket_path) catch {};
@@ -1212,6 +1235,10 @@ fn runWebtestd(allocator: std.mem.Allocator, socket_path: []const u8) !void {
             continue;
         };
         defer conn.stream.close();
+        if (!isPeerAuthorized(conn.stream.handle)) {
+            debugLog("accept rejected unauthorized peer", .{});
+            continue;
+        }
         debugLog("accept ok", .{});
 
         var read_buf: [1024]u8 = undefined;
