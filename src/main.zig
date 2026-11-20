@@ -538,7 +538,12 @@ fn isSafeRuntimePath(path: []const u8) bool {
 
 fn isPeerAuthorized(fd: std.posix.fd_t) bool {
     if (comptime builtin.os.tag == .linux) {
-        var cred: std.os.linux.ucred = undefined;
+        const LinuxUcred = extern struct {
+            pid: i32,
+            uid: u32,
+            gid: u32,
+        };
+        var cred: LinuxUcred = undefined;
         std.posix.getsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.PEERCRED, std.mem.asBytes(&cred)) catch return false;
         return cred.uid == std.os.linux.geteuid();
     }
